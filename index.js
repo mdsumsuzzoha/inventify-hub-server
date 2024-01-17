@@ -41,6 +41,25 @@ async function run() {
             res.send({ token });
         })
 
+        // varify token with middleware
+        const verifyToken = (req, res, next) => {
+            // console.log(req.headers.authorization);
+            if (!req.headers.authorization) {
+                return res.status(401).send({ message: 'Unauthorized Access' });
+            }
+            const token = req.headers.authorization.split(' ')[1]
+            jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+                if (err) {
+                    return res.status(403).send({ message: 'Forbidden Access' })
+                }
+                req.decoded = decoded;
+                // console.log('from verify token', decoded)
+                // console.log('error from token verify',err)
+                next();
+            }
+            );
+        }
+
         // users related api
         app.post('/users', async (req, res) => {
             const user = req.body;
@@ -52,6 +71,26 @@ async function run() {
             }
             const result = await userCollection.insertOne(user);
             res.send(result);
+        })
+        app.get('/users/role/:email', async (req, res) => {
+            const email = req.params.email;
+            // console.log("Requested Email:", email);
+
+            // if (email !== req.decoded.email) {
+            //     // console.log("UnAuthorized Access - Email Mismatch");
+            //     return res.status(403).send({ message: "Forbidden Access" });
+            // }
+            const query = { email: email };
+            const user = await userCollection.findOne(query);
+            // console.log("User:", user?.role);
+
+            let role = null;
+            if (user) {
+                role = user?.role;
+                // console.log(admin);
+            }
+            // console.log("Is Admin:", role);
+            res.send( {role} );
         })
         app.get('/users', async (req, res) => {
             const result = await userCollection.find().toArray();
@@ -81,8 +120,12 @@ async function run() {
             res.send(result);
         })
 
-        app.get('/products', async (req, res) => {
-            const result = await productCollection.find().toArray();
+        //Products related API
+        app.get('/products/:email', async (req, res) => {
+            const email = req.params.email;
+            // console.log("Requested Email inproducts:", email);
+            const query = { shopOwner: email };
+            const result = await productCollection.find(query).toArray();
             res.send(result);
         })
 
