@@ -28,6 +28,7 @@ async function run() {
 
         const productCollection = client.db("inventifyHubDB").collection("products");
         const userCollection = client.db("inventifyHubDB").collection("users");
+        const shopCollection = client.db("inventifyHubDB").collection("shops");
 
         // jwt related api
         app.post('/jwt', async (req, res) => {
@@ -50,6 +51,33 @@ async function run() {
                 return res.send({ message: 'user is already exist', insertedId: null })
             }
             const result = await userCollection.insertOne(user);
+            res.send(result);
+        })
+        app.get('/users', async (req, res) => {
+            const result = await userCollection.find().toArray();
+            // console.log(result);
+            res.send(result);
+        })
+
+        // shop related api
+        app.post('/addShop', async (req, res) => {
+            const shopInfo = req.body;
+            // insert if that users shop if dose not exist
+            const emailQuery = { shopOwnerEmail: shopInfo.shopOwnerEmail }
+            const shopQuery = { shopName: shopInfo.shopName }
+
+            const existingOwner = await shopCollection.findOne(emailQuery);
+            const existingShop = await shopCollection.findOne(shopQuery);
+            if (existingOwner || existingShop) {
+                return res.send({ message: 'Shop is already exist', insertedId: null })
+            }
+            const userQuery = { email: shopInfo.shopOwnerEmail }
+            const update = { $set: { role: "storeManager" } };
+            const userRes = await userCollection.findOneAndUpdate(userQuery, update,);
+            if (!userRes) {
+                return res.send({ message: 'You are already have Shop', insertedId: null })
+            }
+            const result = await shopCollection.insertOne(shopInfo);
             res.send(result);
         })
 
