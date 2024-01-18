@@ -239,17 +239,29 @@ async function run() {
                 { $project: { _id: 0, category: '$_id' } }
             ]).toArray();
             const categories = categoriesAggregate.map(categoryObject => categoryObject.category);
-
             res.send(categories);
 
         })
 
         app.delete('/deleteProduct/:id', verifyToken, verifyManager, async (req, res) => {
             const id = req.params.id;
-            console.log(id);
             const query = { _id: new ObjectId(id) }
-            const result = await productCollection.deleteOne(query);
-            res.send(result);
+            const emailQuery = { shopOwnerEmail: req.decoded.email };
+            const updatedShop = await shopCollection.updateOne(
+                emailQuery,
+                {
+                    $inc: {
+                        // productLimit: -1,
+                        lineOfProduct: -1,
+                    },
+                }
+            );
+            // console.log(updatedShop);
+            if (updatedShop.modifiedCount > 0) {
+                const result = await productCollection.deleteOne(query);
+                res.send(result);
+            }
+
         })
 
         // Send a ping to confirm a successful connection
