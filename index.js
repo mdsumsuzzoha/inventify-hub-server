@@ -4,7 +4,7 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 require('dotenv').config()
 const port = process.env.PORT || 5000;
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 //middleware
 app.use(cors())
@@ -60,6 +60,22 @@ async function run() {
             );
         }
 
+        // varify admin token with middleware
+        const verifyManager = async (req, res, next) => {
+            const email = req.decoded.email;
+            // console.log(email);
+            const query = { email: email };
+            // console.log(query);
+            const user = await userCollection.findOne(query);
+            // console.log(user);
+            const isManager = user?.role === 'storeManager';
+            if (!isManager) {
+                return res.status(403).send({ message: 'Forbidden Access' });
+            }
+            next();
+        }
+
+
         // users related api
         app.post('/users', async (req, res) => {
             const user = req.body;
@@ -72,7 +88,7 @@ async function run() {
             const result = await userCollection.insertOne(user);
             res.send(result);
         })
-        app.get('/users/role/:email', async (req, res) => {
+        app.get('/users/role/:email', verifyToken, async (req, res) => {
             const email = req.params.email;
             // console.log("Requested Email:", email);
 
@@ -90,7 +106,7 @@ async function run() {
                 // console.log(admin);
             }
             // console.log("Is Admin:", role);
-            res.send( {role} );
+            res.send({ role });
         })
         app.get('/users', async (req, res) => {
             const result = await userCollection.find().toArray();
@@ -99,33 +115,140 @@ async function run() {
         })
 
         // shop related api
-        app.post('/addShop', async (req, res) => {
-            const shopInfo = req.body;
+        app.post('/addShop', verifyToken, async (req, res) => {
+            let shopInfo = req.body;
+
+            // Function to generate a padded 4-digit serial number
+            const generateSerial = (serial) => {
+                return serial.toString().padStart(4, '0');
+            };
+            const currentSerial = 1;
+            // Remove spaces and convert to lowercase
+            const formattedShopName = shopInfo.shopName.replace(/\s+/g, '').toLowerCase();
+            // Generate the shopId
+            const shopId = `${formattedShopName}${generateSerial(currentSerial)}`;
+            // Insert the shopId into shopInfo
+            shopInfo.shopId = shopId;
+
             // insert if that users shop if dose not exist
             const emailQuery = { shopOwnerEmail: shopInfo.shopOwnerEmail }
             const shopQuery = { shopName: shopInfo.shopName }
 
             const existingOwner = await shopCollection.findOne(emailQuery);
             const existingShop = await shopCollection.findOne(shopQuery);
+
             if (existingOwner || existingShop) {
                 return res.send({ message: 'Shop is already exist', insertedId: null })
             }
+            // Update the user role to manager
             const userQuery = { email: shopInfo.shopOwnerEmail }
             const update = { $set: { role: "storeManager" } };
             const userRes = await userCollection.findOneAndUpdate(userQuery, update,);
+
+            // Check the user is already manager then do not create a SHOP
             if (!userRes) {
                 return res.send({ message: 'You are already have Shop', insertedId: null })
             }
+
             const result = await shopCollection.insertOne(shopInfo);
             res.send(result);
         })
 
         //Products related API
-        app.get('/products/:email', async (req, res) => {
+        app.post('/addProduct', verifyToken, verifyManager, async (req, res) => {
+            let productInfo = req.body;
+
+            const productAggregate = await productCollection.aggregate([
+                {
+                    $project: {
+                        last5Digits: {
+                            $toInt: {
+                                $arrayElemAt: [
+                                    { $split: ["$productId", "-"] }, -1,
+                                ],
+                            },
+                        },
+                    },
+                },
+                {
+                    $group: {
+                        _id: null,
+                        maxLast5Digits: { $max: "$last5Digits" },
+                    },
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        maxLast5Digits: 1,
+                    },
+                },
+            ]).toArray();
+
+            const maxLast5Digits = productAggregate.length > 0 ? productAggregate[0].maxLast5Digits : 0;
+            // Function to generate a padded 4-digit serial number
+            const generateSerial = (serial) => {
+                return serial.toString().padStart(5, '0');
+            };
+            const currentSerial = maxLast5Digits + 1;
+            // Remove spaces and convert to lowercase
+            const formattedShopName = "prod";
+            // Generate the shopId
+            const productId = `${formattedShopName}-${generateSerial(currentSerial)}`;
+            // Insert the shopId into shopInfo
+            productInfo.productId = productId;
+
+            // console.log(productInfo);
+            const emailQuery = { shopOwnerEmail: productInfo.shopOwnerEmail };
+            const shop = await shopCollection.findOne(emailQuery);
+            if (!shop) {
+                return res.status(403).send({ message: 'Forbidden Access' })
+            } else if (shop.productLimit < shop.lineOfProduct) {
+                return res.status(422).send({ message: 'Your limit is over' });
+
+            }
+            const updatedShop = await shopCollection.updateOne(
+                emailQuery,
+                {
+                    $inc: {
+                        // productLimit: -1,
+                        lineOfProduct: 1,
+                    },
+                }
+            );
+            if (updatedShop.modifiedCount > 0) {
+                const result = await productCollection.insertOne(productInfo);
+                res.send(result);
+
+            }
+            // console.log(updatedShop);
+
+        })
+
+        app.get('/products/:email', verifyToken, verifyManager, async (req, res) => {
             const email = req.params.email;
             // console.log("Requested Email inproducts:", email);
-            const query = { shopOwner: email };
+            const query = { shopOwnerEmail: email };
             const result = await productCollection.find(query).toArray();
+            // console.log(result);
+            res.send(result);
+        })
+
+        app.get('/categories', verifyToken, async (req, res) => {
+            const categoriesAggregate = await productCollection.aggregate([
+                { $group: { _id: '$category' } },
+                { $project: { _id: 0, category: '$_id' } }
+            ]).toArray();
+            const categories = categoriesAggregate.map(categoryObject => categoryObject.category);
+
+            res.send(categories);
+
+        })
+
+        app.delete('/deleteProduct/:id', verifyToken, verifyManager, async (req, res) => {
+            const id = req.params.id;
+            console.log(id);
+            const query = { _id: new ObjectId(id) }
+            const result = await productCollection.deleteOne(query);
             res.send(result);
         })
 
