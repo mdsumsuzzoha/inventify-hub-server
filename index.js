@@ -233,6 +233,13 @@ async function run() {
             res.send(result);
         })
 
+        app.get('/product/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) }
+            const result = await productCollection.findOne(query);
+            res.send(result);
+        })
+
         app.get('/categories', verifyToken, async (req, res) => {
             const categoriesAggregate = await productCollection.aggregate([
                 { $group: { _id: '$category' } },
@@ -240,6 +247,32 @@ async function run() {
             ]).toArray();
             const categories = categoriesAggregate.map(categoryObject => categoryObject.category);
             res.send(categories);
+
+        })
+
+        app.patch('/updateProduct/:id', verifyToken, verifyManager, async (req, res) => {
+            const id = req.params.id;
+            const productInfo = req.body;
+            const query = { _id: new ObjectId(id) };
+            // const options = { upsert: true };
+            const updateDoc = {
+                $set: {
+                    name: productInfo.name,
+                    image: productInfo.image,
+                    category: productInfo.category,
+                    stockQuantity: productInfo.stockQuantity,
+                    productLocation: productInfo.productLocation,
+                    productionCost: productInfo.productionCost,
+                    profitMargin: productInfo.profitMargin,
+                    discount: productInfo.discount,
+                    description: productInfo.description,
+                    sellingPrice: productInfo.sellingPrice,
+                },
+            };
+            // console.log(updateDoc);
+            const result = await productCollection.updateOne(query, updateDoc);
+            res.send(result);
+
 
         })
 
