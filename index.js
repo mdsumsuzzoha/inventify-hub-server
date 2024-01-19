@@ -26,9 +26,10 @@ async function run() {
         // Connect the client to the server	(optional starting in v4.7)
         // await client.connect();
 
-        const productCollection = client.db("inventifyHubDB").collection("products");
         const userCollection = client.db("inventifyHubDB").collection("users");
         const shopCollection = client.db("inventifyHubDB").collection("shops");
+        const productCollection = client.db("inventifyHubDB").collection("products");
+        const cartCollection = client.db("inventifyHubDB").collection("carts");
 
         // jwt related api
         app.post('/jwt', async (req, res) => {
@@ -202,7 +203,7 @@ async function run() {
             const shop = await shopCollection.findOne(emailQuery);
             if (!shop) {
                 return res.status(403).send({ message: 'Forbidden Access' })
-            } else if (shop.productLimit < shop.lineOfProduct) {
+            } else if (shop.productLimit <= shop.lineOfProduct) {
                 return res.status(422).send({ message: 'Your limit is over' });
 
             }
@@ -224,8 +225,8 @@ async function run() {
 
         })
 
-        app.get('/products/:email', verifyToken, verifyManager, async (req, res) => {
-            const email = req.params.email;
+        app.get('/products', verifyToken, async (req, res) => {
+            const email = req.decoded.email;
             // console.log("Requested Email inproducts:", email);
             const query = { shopOwnerEmail: email };
             const result = await productCollection.find(query).toArray();
@@ -295,6 +296,38 @@ async function run() {
                 res.send(result);
             }
 
+        })
+
+        // carts collection
+        app.get('/carts', verifyToken, async (req, res) => {
+            const email = req.decoded.email;
+            employQuery = email;
+            const shop = await shopCollection.findOne({ 'shopEmployes': employQuery });
+            const query = { shopId: shop.shopId }
+            const result = await cartCollection.find(query).toArray();
+            res.send(result);
+        })
+
+        app.post('/carts', verifyToken, async (req, res) => {
+            let cartItem = req.body;
+            const productQuery = { productId: cartItem.productId };
+            employQuery = cartItem.issueBy;
+            const shop = await shopCollection.findOne({ 'shopEmployes': employQuery });
+
+            // Insert the shopId into cartItem
+            cartItem.shopId = shop.shopId;
+            const updatedProd = await productCollection.updateOne(
+                productQuery,
+                {
+                    $inc: {
+                        stockQuantity: -1,
+                    },
+                }
+            );
+            if (updatedProd.modifiedCount > 0) {
+                const result = await cartCollection.insertOne(cartItem);
+                res.send(result);
+            }
         })
 
         // Send a ping to confirm a successful connection
