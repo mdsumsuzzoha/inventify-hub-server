@@ -3,6 +3,7 @@ const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 require('dotenv').config()
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
@@ -28,8 +29,10 @@ async function run() {
 
         const userCollection = client.db("inventifyHubDB").collection("users");
         const shopCollection = client.db("inventifyHubDB").collection("shops");
+        const paymentCollection = client.db("inventifyHubDB").collection("payments");
         const productCollection = client.db("inventifyHubDB").collection("products");
         const cartCollection = client.db("inventifyHubDB").collection("carts");
+        const invoiceCollection = client.db("inventifyHubDB").collection("saleInvoices");
 
         // jwt related api
         app.post('/jwt', async (req, res) => {
@@ -153,6 +156,13 @@ async function run() {
 
             const result = await shopCollection.insertOne(shopInfo);
             res.send(result);
+        })
+
+        app.get('/shop', async (req, res) => {
+            const employEmail = req.query.employe;
+            const shop = await shopCollection.findOne({ 'shopEmployes': employEmail });
+            res.send(shop);
+
         })
 
         //Products related API
@@ -313,23 +323,123 @@ async function run() {
             const productQuery = { productId: cartItem.productId };
             employQuery = cartItem.issueBy;
             const shop = await shopCollection.findOne({ 'shopEmployes': employQuery });
-
             // Insert the shopId into cartItem
             cartItem.shopId = shop.shopId;
-            const updatedProd = await productCollection.updateOne(
-                productQuery,
-                {
-                    $inc: {
-                        stockQuantity: -1,
-                    },
+
+            const product = await productCollection.findOne(productQuery);
+            if (product.stockQuantity > 0) {
+                const updatedProd = await productCollection.updateOne(
+                    productQuery,
+                    {
+                        $inc: {
+                            stockQuantity: -1,
+                        },
+                    }
+                );
+                if (updatedProd.modifiedCount > 0) {
+                    const result = await cartCollection.insertOne(cartItem);
+                    res.send(result);
                 }
-            );
-            if (updatedProd.modifiedCount > 0) {
-                const result = await cartCollection.insertOne(cartItem);
-                res.send(result);
+            } else {
+                res.status(422).send({ error: 'Product Stock nill' });
+            }
+
+        })
+
+        // Sale Invoice collection
+        app.post('/saleInvoice', verifyToken, async (req, res) => {
+            const invoiceInfo = req.body;
+            // console.log(invoiceInfo)
+            const invoiceNumber = invoiceInfo.invoiceNumber;
+            const invoiceDate = invoiceInfo.invoiceDate;
+
+            const additionalInvoiceInfo = {
+                invoiceNumber,
+                invoiceDate,
+            };
+
+            const getAllCartOfShop = await cartCollection.find({ shopId: invoiceInfo.shopId }).toArray();
+
+            const itemsWithInvoiceId = getAllCartOfShop.map(item => ({ ...item, ...additionalInvoiceInfo }));
+
+            // console.log(itemsWithInvoiceId)
+
+            if (getAllCartOfShop.length > 0) {
+                // Save data to the invoiceCollection                
+                const deleteAllCartOfShop = await cartCollection.deleteMany({ shopId: invoiceInfo.shopId });
+                if (deleteAllCartOfShop.deletedCount < 0) {
+                    return res.status(422).send({ message: 'Check-Out product can not clear.' });
+                } else {
+                    const result = await invoiceCollection.insertMany(itemsWithInvoiceId);
+                    if (result.insertedCount > 0) {
+                        res.send(result);
+                    }
+                    res.status(422).send({ message: 'Generate invoice is failed.' });
+                }
+
+            } else {
+                res.status(422).send({ message: 'No items found for Generate Bill' });
             }
         })
 
+        app.get('/invs', async (req, res) => {
+            const result = await invoiceCollection.find().toArray();
+            // console.log(result)
+            // res.send(result);
+        })
+        app.get('/invoice', async (req, res) => {
+            const invId = req.query.inv;
+            // console.log(invId)
+            const result = await invoiceCollection.find({ invoiceNumber: invId }).toArray();
+            // console.log(result)
+            res.send(result);
+        })
+
+        //Create a PaymentIntent
+        app.post("/create-payment-intent", async (req, res) => {
+            const { price } = req.body;
+            const amount = parseInt(price * 100);
+            // Create a PaymentIntent with the order amount and currency
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: 'usd',
+                "payment_method_types": [
+                    "card",
+
+                ],
+            });
+            res.send({
+                clientSecret: paymentIntent.client_secret,
+            });
+        });
+
+        app.post('/payments', async (req, res) => {
+            const paymentInfo = req.body;
+            // package limit 
+            let limit = 0;
+            if (paymentInfo.paidAmount >= 50) {
+                limit = 1500;
+            } else if (paymentInfo.paidAmount >= 20) {
+                limit = 450;
+            } else if (paymentInfo.paidAmount >= 10) {
+                limit = 200;
+            }
+
+            const shopQuery = { shopId: paymentInfo.shopId };
+            const updatedShop = await shopCollection.updateOne(
+                shopQuery,
+                {
+                    $set: {
+                        productLimit: limit,
+                    },
+                }
+            );
+            // console.log(updatedShop);
+            if (updatedShop.modifiedCount > 0) {
+                const paymentResult = await paymentCollection.insertOne(paymentInfo);
+                res.send(paymentResult);
+            }
+        })
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
