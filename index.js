@@ -99,6 +99,21 @@ async function run() {
             next();
         }
 
+        // varify shopAuthorized token with middleware
+        const verifyShopAuthorized = async (req, res, next) => {
+            const email = req.decoded.email;
+            // console.log(email);
+            const query = { email: email };
+            // console.log(query);
+            const user = await userCollection.findOne(query);
+            // console.log(user);
+            const isManager = user?.role === 'storeManager' || 'shopKeeper';
+            if (!isManager) {
+                return res.status(403).send({ message: 'Forbidden Access' });
+            }
+            next();
+        }
+
 
         // users related api
         app.post('/users', async (req, res) => {
@@ -183,7 +198,8 @@ async function run() {
             res.send(result);
         })
 
-        app.get('/shop', async (req, res) => {
+        // get shop by user specific on useShopUserWise
+        app.get('/shop', verifyToken, async (req, res) => {
             const employEmail = req.query.employe;
             const shop = await shopCollection.findOne({ 'shopEmployes': employEmail });
             res.send(shop);
@@ -191,7 +207,7 @@ async function run() {
         })
         app.get('/allShops', verifyToken, verifyAdmin, async (req, res) => {
             const shops = await shopCollection.find().toArray();
-            console.log(shops)
+            // console.log(shops)
             res.send(shops);
 
         })
@@ -273,21 +289,22 @@ async function run() {
             // console.log(result);
             res.send(result);
         })
-        app.get('/products', verifyToken, async (req, res) => {
-            const email = req.decoded.email;
-            // console.log("Requested Email inproducts:", email);
-            const query = { shopOwnerEmail: email };
+
+        // get the products by shop wise on useProductsShopWise
+        app.get('/products', verifyToken, verifyShopAuthorized, async (req, res) => {
+            const shopId = req.query.shop;
+            const query = { shopId: shopId };
             const result = await productCollection.find(query).toArray();
             // console.log(result);
             res.send(result);
         })
 
-        app.get('/product/:id', async (req, res) => {
-            const id = req.params.id;
-            const query = { _id: new ObjectId(id) }
-            const result = await productCollection.findOne(query);
-            res.send(result);
-        })
+        // app.get('/product/:id', async (req, res) => {
+        //     const id = req.params.id;
+        //     const query = { _id: new ObjectId(id) }
+        //     const result = await productCollection.findOne(query);
+        //     res.send(result);
+        // })
 
         app.get('/categories', async (req, res) => {
             const shopId = req.query.shopId;
@@ -353,16 +370,14 @@ async function run() {
         })
 
         // carts collection
-        app.get('/carts', verifyToken, async (req, res) => {
-            const email = req.decoded.email;
-            employQuery = email;
-            const shop = await shopCollection.findOne({ 'shopEmployes': employQuery });
-            const query = { shopId: shop.shopId }
+        app.get('/carts', verifyToken, verifyShopAuthorized, async (req, res) => {
+            const shopId = req.query.shop;
+            const query = { shopId: shopId };
             const result = await cartCollection.find(query).toArray();
             res.send(result);
         })
 
-        app.post('/carts', verifyToken, async (req, res) => {
+        app.post('/carts', verifyToken, verifyShopAuthorized, async (req, res) => {
             let cartItem = req.body;
             const productQuery = { productId: cartItem.productId };
             employQuery = cartItem.issueBy;
@@ -391,7 +406,7 @@ async function run() {
         })
 
         // Sale Invoice collection
-        app.post('/saleInvoice', verifyToken, async (req, res) => {
+        app.post('/saleInvoice', verifyToken, verifyShopAuthorized, async (req, res) => {
             try {
                 const invoiceInfo = req.body;
                 const invoiceNumber = invoiceInfo.invoiceNumber;
@@ -461,14 +476,53 @@ async function run() {
             }
         });
 
-
-        app.get('/saleItems', async (req, res) => {
+        // to get sale items of individual shop in ShopHome
+        app.get('/saleItems', verifyToken, async (req, res) => {
             // console.log(req.query.shop);
             const shopQuery = { shopId: req.query.shop }
             const result = await invoiceCollection.find(shopQuery).toArray();
             res.send(result);
 
-        })
+        });
+
+        // to get sale items of individual shop in ShopHome
+        app.get('/chart-data', verifyToken, async (req, res) => {
+            try {
+                const shopQuery = { shopId: req.query.shop };
+
+                const result = await invoiceCollection.aggregate([
+                    { $match: shopQuery },
+                    {
+                        $group: {
+                            _id: "$invoiceNumber",
+                            totalBuyingPriceWhVat: { $sum: "$buyingPriceWhVat" },
+                            totalDiscount: { $sum: "$discount" },
+                            totalSaleQuantity: { $sum: "$saleQuantity" },
+                            totalTotalPriceWhDisc: { $sum: "$totalPriceWhDisc" },
+                        },
+                    },
+                    {
+                        $project: {
+                            _id: 0, // Exclude _id field from the result
+                            invoiceNumber: "$_id",
+                            totalBuyingPriceWhVat: 1,
+                            totalDiscount: 1,
+                            totalSaleQuantity: 1,
+                            totalTotalPriceWhDisc: 1,
+                            totalProfit: { $subtract: ["$totalTotalPriceWhDisc", "$totalBuyingPriceWhVat"] },
+                        },
+                    },
+                    { $sort: { invoiceNumber: 1 } }, // Sort by invoiceNumber in ascending order
+                ]).toArray();
+
+                res.send(result);
+            } catch (error) {
+                console.error("Error fetching projected sale data:", error);
+                res.status(500).send({ error: "Internal Server Error" });
+            }
+        });
+
+
 
 
         app.get('/shopInvoice', async (req, res) => {
@@ -493,14 +547,14 @@ async function run() {
             } catch (error) {
                 res.status(500).send("Internal Server Error");
             }
-        })
+        });
         app.get('/invoice', async (req, res) => {
             const invId = req.query.inv;
             // console.log(invId)
             const result = await invoiceCollection.find({ invoiceNumber: invId }).toArray();
             // console.log(result)
             res.send(result);
-        })
+        });
 
         //Create a PaymentIntent
         app.post("/create-payment-intent", async (req, res) => {
@@ -548,21 +602,20 @@ async function run() {
             }
         })
 
-        // Import necessary libraries and modules
 
-        // Import necessary libraries and modules
+        // Generate pdf from htlm
 
         app.post('/generate-pdf', async (req, res) => {
             const { htmlContent } = req.body;
 
-            const browser = await  puppeteer.launch({
-                headless: 'new', 
-              });
+            const browser = await puppeteer.launch({
+                headless: 'new',
+            });
             const page = await browser.newPage();
 
             await page.pdf({
                 format: 'A4',
-              });
+            });
 
             await page.setContent(htmlContent);
 
@@ -573,10 +626,6 @@ async function run() {
             res.setHeader('Content-Type', 'application/pdf');
             res.send(pdfBuffer);
         });
-
-
-
-
 
 
         // Send a ping to confirm a successful connection
