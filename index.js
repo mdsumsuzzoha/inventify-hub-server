@@ -2,6 +2,10 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+
+const puppeteer = require('puppeteer');
+const bodyParser = require('body-parser');
+
 require('dotenv').config()
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
@@ -10,6 +14,8 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 //middleware
 app.use(cors())
 app.use(express.json());
+app.use(bodyParser.json());
+
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@pheroprojectdbcluster.qyoezfv.mongodb.net/?retryWrites=true&w=majority`;
 
@@ -65,6 +71,20 @@ async function run() {
         }
 
         // varify admin token with middleware
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.decoded.email;
+            // console.log(email);
+            const query = { email: email };
+            // console.log(query);
+            const user = await userCollection.findOne(query);
+            // console.log(user);
+            const isAdmin = user?.role === 'admin';
+            if (!isAdmin) {
+                return res.status(403).send({ message: 'Forbidden Access' });
+            }
+            next();
+        }
+        // varify admin token with middleware
         const verifyManager = async (req, res, next) => {
             const email = req.decoded.email;
             // console.log(email);
@@ -112,7 +132,7 @@ async function run() {
             // console.log("Is Admin:", role);
             res.send({ role });
         })
-        app.get('/users', async (req, res) => {
+        app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
             const result = await userCollection.find().toArray();
             // console.log(result);
             res.send(result);
@@ -146,7 +166,12 @@ async function run() {
             }
             // Update the user role to manager
             const userQuery = { email: shopInfo.shopOwnerEmail }
-            const update = { $set: { role: "storeManager" } };
+            const update = {
+                $set: {
+                    role: "storeManager",
+                    shopName: shopInfo.shopName,
+                }
+            };
             const userRes = await userCollection.findOneAndUpdate(userQuery, update,);
 
             // Check the user is already manager then do not create a SHOP
@@ -162,6 +187,12 @@ async function run() {
             const employEmail = req.query.employe;
             const shop = await shopCollection.findOne({ 'shopEmployes': employEmail });
             res.send(shop);
+
+        })
+        app.get('/allShops', verifyToken, verifyAdmin, async (req, res) => {
+            const shops = await shopCollection.find().toArray();
+            console.log(shops)
+            res.send(shops);
 
         })
 
@@ -235,6 +266,13 @@ async function run() {
 
         })
 
+        app.get('/allProducts', verifyToken, verifyAdmin, async (req, res) => {
+            const email = req.decoded.email;
+            // console.log("Requested Email inproducts:", email);
+            const result = await productCollection.find().toArray();
+            // console.log(result);
+            res.send(result);
+        })
         app.get('/products', verifyToken, async (req, res) => {
             const email = req.decoded.email;
             // console.log("Requested Email inproducts:", email);
@@ -251,11 +289,17 @@ async function run() {
             res.send(result);
         })
 
-        app.get('/categories', verifyToken, async (req, res) => {
+        app.get('/categories', async (req, res) => {
+            const shopId = req.query.shopId;
+
+            // Add a match shop to filter by shopId
+            const matchShop = { $match: { shopId: shopId } };
             const categoriesAggregate = await productCollection.aggregate([
+                matchShop,
                 { $group: { _id: '$category' } },
                 { $project: { _id: 0, category: '$_id' } }
             ]).toArray();
+
             const categories = categoriesAggregate.map(categoryObject => categoryObject.category);
             res.send(categories);
 
@@ -348,44 +392,107 @@ async function run() {
 
         // Sale Invoice collection
         app.post('/saleInvoice', verifyToken, async (req, res) => {
-            const invoiceInfo = req.body;
-            // console.log(invoiceInfo)
-            const invoiceNumber = invoiceInfo.invoiceNumber;
-            const invoiceDate = invoiceInfo.invoiceDate;
+            try {
+                const invoiceInfo = req.body;
+                const invoiceNumber = invoiceInfo.invoiceNumber;
+                const invoiceDate = invoiceInfo.invoiceDate;
 
-            const additionalInvoiceInfo = {
-                invoiceNumber,
-                invoiceDate,
-            };
+                const additionalInvoiceInfo = {
+                    invoiceNumber,
+                    invoiceDate,
+                };
 
-            const getAllCartOfShop = await cartCollection.find({ shopId: invoiceInfo.shopId }).toArray();
+                const getAllCartOfShop = await cartCollection.find({ shopId: invoiceInfo.shopId }).toArray();
 
-            const itemsWithInvoiceId = getAllCartOfShop.map(item => ({ ...item, ...additionalInvoiceInfo }));
+                const itemsWithInvoiceId = getAllCartOfShop.map(item => ({ ...item, ...additionalInvoiceInfo }));
 
-            // console.log(itemsWithInvoiceId)
+                const aggregateResult = await cartCollection.aggregate([
+                    {
+                        $match: { shopId: invoiceInfo.shopId }
+                    },
+                    {
+                        $group: {
+                            _id: '$productId',
+                            shopId: { $first: '$shopId' },
+                            totalSaleQuantity: { $sum: '$saleQuantity' }
+                        }
+                    },
+                    {
+                        $project: {
+                            _id: 0,
+                            productId: '$_id',
+                            shopId: 1,
+                            totalSaleQuantity: 1
+                        }
+                    }
+                ]).toArray();
 
-            if (getAllCartOfShop.length > 0) {
-                // Save data to the invoiceCollection                
-                const deleteAllCartOfShop = await cartCollection.deleteMany({ shopId: invoiceInfo.shopId });
-                if (deleteAllCartOfShop.deletedCount < 0) {
-                    return res.status(422).send({ message: 'Check-Out product can not clear.' });
-                } else {
+                if (getAllCartOfShop.length > 0) {
+                    // Iterate over each result from the aggregation
+                    for (const result of aggregateResult) {
+                        const { productId, shopId, totalSaleQuantity } = result;
+
+                        // Update the saleCount for the product in productCollection
+                        await productCollection.updateOne(
+                            { productId, shopId },
+                            { $inc: { saleCount: totalSaleQuantity } }
+                        );
+                    }
+
+                    // Save data to the invoiceCollection
+                    const deleteAllCartOfShop = await cartCollection.deleteMany({ shopId: invoiceInfo.shopId });
+                    if (deleteAllCartOfShop.deletedCount < 0) {
+                        return res.status(422).send({ message: 'Check-Out product cannot be cleared.' });
+                    }
+
+                    // Send the response after completing all operations
                     const result = await invoiceCollection.insertMany(itemsWithInvoiceId);
                     if (result.insertedCount > 0) {
-                        res.send(result);
+                        return res.send(result);
+                    } else {
+                        return res.status(422).send({ message: 'Generate invoice failed.' });
                     }
-                    res.status(422).send({ message: 'Generate invoice is failed.' });
+                } else {
+                    return res.status(422).send({ message: 'No items found for Generate Bill' });
                 }
-
-            } else {
-                res.status(422).send({ message: 'No items found for Generate Bill' });
+            } catch (error) {
+                console.error(error);
+                return res.status(500).send({ message: 'Internal Server Error' });
             }
+        });
+
+
+        app.get('/saleItems', async (req, res) => {
+            // console.log(req.query.shop);
+            const shopQuery = { shopId: req.query.shop }
+            const result = await invoiceCollection.find(shopQuery).toArray();
+            res.send(result);
+
         })
 
-        app.get('/invs', async (req, res) => {
-            const result = await invoiceCollection.find().toArray();
-            // console.log(result)
-            // res.send(result);
+
+        app.get('/shopInvoice', async (req, res) => {
+            try {
+                const shopId = req.query.shop;
+                const result = await invoiceCollection.aggregate([
+                    { $match: { shopId: shopId } },
+                    {
+                        $group: {
+                            _id: { invoiceNumber: "$invoiceNumber", shopId: "$shopId" }
+                        }
+                    },
+                    {
+                        $project: {
+                            _id: 0, // Exclude the _id field
+                            invoiceNumber: "$_id.invoiceNumber",
+                            shopId: "$_id.shopId"
+                        }
+                    }
+                ]).toArray();
+                res.send(result);
+            } catch (error) {
+                res.status(500).send("Internal Server Error");
+            }
         })
         app.get('/invoice', async (req, res) => {
             const invId = req.query.inv;
@@ -440,6 +547,38 @@ async function run() {
                 res.send(paymentResult);
             }
         })
+
+        // Import necessary libraries and modules
+
+        // Import necessary libraries and modules
+
+        app.post('/generate-pdf', async (req, res) => {
+            const { htmlContent } = req.body;
+
+            const browser = await  puppeteer.launch({
+                headless: 'new', 
+              });
+            const page = await browser.newPage();
+
+            await page.pdf({
+                format: 'A4',
+              });
+
+            await page.setContent(htmlContent);
+
+            const pdfBuffer = await page.pdf();
+
+            await browser.close();
+
+            res.setHeader('Content-Type', 'application/pdf');
+            res.send(pdfBuffer);
+        });
+
+
+
+
+
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
