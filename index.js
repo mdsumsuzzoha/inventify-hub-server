@@ -2,8 +2,6 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
-
-const puppeteer = require('puppeteer');
 const bodyParser = require('body-parser');
 
 require('dotenv').config()
@@ -11,8 +9,22 @@ const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
-//middleware
-app.use(cors())
+
+// middleware
+
+app.use(cors({
+    origin: [
+        'https://inventify-hub-24f65.firebaseapp.com',
+        'https://inventify-hub-24f65.web.app',
+    ],
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+
+
+
+// app.use(cors());
 app.use(express.json());
 app.use(bodyParser.json());
 
@@ -25,7 +37,13 @@ const client = new MongoClient(uri, {
         version: ServerApiVersion.v1,
         strict: true,
         deprecationErrors: true,
-    }
+    },
+    // connection pool for vercel
+    // ==========================
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    maxPoolSize: 10,
+    // ==========================
 });
 
 async function run() {
@@ -34,6 +52,7 @@ async function run() {
         // await client.connect();
 
         const userCollection = client.db("inventifyHubDB").collection("users");
+        const joinReqCollection = client.db("inventifyHubDB").collection("joinRequests");
         const shopCollection = client.db("inventifyHubDB").collection("shops");
         const paymentCollection = client.db("inventifyHubDB").collection("payments");
         const productCollection = client.db("inventifyHubDB").collection("products");
@@ -47,13 +66,11 @@ async function run() {
                 user,
                 process.env.ACCESS_TOKEN_SECRET,
                 { expiresIn: '1h' });
-            // console.log(token);
             res.send({ token });
         })
 
         // varify token with middleware
         const verifyToken = (req, res, next) => {
-            // console.log(req.headers.authorization);
             if (!req.headers.authorization) {
                 return res.status(401).send({ message: 'Unauthorized Access' });
             }
@@ -63,8 +80,6 @@ async function run() {
                     return res.status(403).send({ message: 'Forbidden Access' })
                 }
                 req.decoded = decoded;
-                // console.log('from verify token', decoded)
-                // console.log('error from token verify',err)
                 next();
             }
             );
@@ -73,11 +88,8 @@ async function run() {
         // varify admin token with middleware
         const verifyAdmin = async (req, res, next) => {
             const email = req.decoded.email;
-            // console.log(email);
             const query = { email: email };
-            // console.log(query);
             const user = await userCollection.findOne(query);
-            // console.log(user);
             const isAdmin = user?.role === 'admin';
             if (!isAdmin) {
                 return res.status(403).send({ message: 'Forbidden Access' });
@@ -85,14 +97,11 @@ async function run() {
             next();
         }
         // varify admin token with middleware
-        const verifyManager = async (req, res, next) => {
+        const verifyAdminManager = async (req, res, next) => {
             const email = req.decoded.email;
-            // console.log(email);
             const query = { email: email };
-            // console.log(query);
             const user = await userCollection.findOne(query);
-            // console.log(user);
-            const isManager = user?.role === 'storeManager';
+            const isManager = user?.role === 'storeManager' || 'admin';
             if (!isManager) {
                 return res.status(403).send({ message: 'Forbidden Access' });
             }
@@ -102,13 +111,10 @@ async function run() {
         // varify shopAuthorized token with middleware
         const verifyShopAuthorized = async (req, res, next) => {
             const email = req.decoded.email;
-            // console.log(email);
             const query = { email: email };
-            // console.log(query);
             const user = await userCollection.findOne(query);
-            // console.log(user);
-            const isManager = user?.role === 'storeManager' || 'shopKeeper';
-            if (!isManager) {
+            const isAuthorize = user?.role === 'storeManager' || 'shopKeeper';
+            if (!isAuthorize) {
                 return res.status(403).send({ message: 'Forbidden Access' });
             }
             next();
@@ -129,30 +135,81 @@ async function run() {
         })
         app.get('/users/role/:email', verifyToken, async (req, res) => {
             const email = req.params.email;
-            // console.log("Requested Email:", email);
 
-            // if (email !== req.decoded.email) {
-            //     // console.log("UnAuthorized Access - Email Mismatch");
-            //     return res.status(403).send({ message: "Forbidden Access" });
-            // }
             const query = { email: email };
             const user = await userCollection.findOne(query);
-            // console.log("User:", user?.role);
 
             let role = null;
             if (user) {
                 role = user?.role;
-                // console.log(admin);
             }
-            // console.log("Is Admin:", role);
             res.send({ role });
         })
+        // get all users for admin page on allUsers
         app.get('/users', verifyToken, verifyAdmin, async (req, res) => {
-            const result = await userCollection.find().toArray();
-            // console.log(result);
+            const result = await userCollection.find().sort({ role: 1 }).toArray();
             res.send(result);
         })
 
+        app.post('/joinRequest', verifyToken, async (req, res) => {
+            const reqInfo = req.body;
+            const userVerify = await userCollection.findOne({ email: reqInfo.candidateEmail })
+            if (userVerify) {
+                const result = await joinReqCollection.insertOne(reqInfo);
+                res.send(result);
+            } else {
+                res.status(500).send({ message: 'Failed to submit request' });
+
+            }
+
+        })
+
+        app.get('/joiningReq', verifyToken, async (req, res) => {
+            // const shop = req.query.shopId;
+
+            const queryReq = { selectedShopId: req.query.shopId }
+            const joinRequest = await joinReqCollection.find(queryReq).toArray();
+            res.send(joinRequest);
+        })
+
+        app.patch('/approvedReq', verifyToken, verifyAdminManager, async (req, res) => {
+            const approvedReqInfo = req.body;
+            try {
+                const userUpdate = await userCollection.updateOne(
+                    { email: approvedReqInfo.candidateEmail },
+                    {
+                        $set: {
+                            role: approvedReqInfo.joinPost,
+                            shopName: approvedReqInfo.selectedShopName,
+                        }
+                    }
+                );
+                if (userUpdate.acknowledged == true) {
+                    const updateShop = await shopCollection.updateOne(
+                        { shopId: approvedReqInfo.selectedShopId },
+                        { $push: { shopEmployees: approvedReqInfo.candidateEmail } }
+                    );
+                    if (updateShop.acknowledged == true) {
+                        const updateJoinReq = await joinReqCollection.updateOne(
+                            { _id: new ObjectId(approvedReqInfo._id) },
+                            { $set: { requests: 'Approved' } }
+                        );
+                        res.send(updateJoinReq);
+                    }
+                    else {
+
+                        res.status(422).send({ message: 'Join request updated failed' });
+                    }
+
+                } else {
+                    res.status(422).send({ message: 'User info updated failed' });
+
+                }
+            } catch (error) {
+                res.status(500).json({ error: 'Internal Server Error' });
+            }
+
+        })
         // shop related api
         app.post('/addShop', verifyToken, async (req, res) => {
             let shopInfo = req.body;
@@ -200,20 +257,61 @@ async function run() {
 
         // get shop by user specific on useShopUserWise
         app.get('/shop', verifyToken, async (req, res) => {
-            const employEmail = req.query.employe;
-            const shop = await shopCollection.findOne({ 'shopEmployes': employEmail });
+            const employeeEmail = req.query.employee;
+            const shop = await shopCollection.findOne({ 'shopEmployees': employeeEmail });
             res.send(shop);
 
         })
         app.get('/allShops', verifyToken, verifyAdmin, async (req, res) => {
             const shops = await shopCollection.find().toArray();
-            // console.log(shops)
+            res.send(shops);
+
+        })
+        app.get('/recruiterShops', verifyToken, async (req, res) => {
+            const shopQuery = { vacancies: { $exists: true, $ne: [] } };
+            const shops = await shopCollection.find(shopQuery).toArray();
             res.send(shops);
 
         })
 
+        app.delete('/deleteShop/:id', verifyToken, verifyAdmin, async (req, res) => {
+            const shopId = req.params.id;
+            const query = { shopId: shopId }
+            try {
+                const shop = await shopCollection.findOne(query);
+                if (!shop) {
+
+                    return res.status(404).json({ message: 'Shop not found' });
+                }
+                const emails = shop.shopEmployees;
+
+                const updatePromises = emails.map(async (email) => {
+                    const updateResult = await userCollection.updateOne(
+                        { email },
+                        {
+                            $pull: { 'shops.shopId': shopId }, // Assuming the shops array structure
+                            $set: { role: "user" } // Set the role to "user"
+                        }
+                    );
+                    return updateResult;
+                });
+                const updateResults = await Promise.all(updatePromises);
+
+                if (updateResults.some(result => result.acknowledged == true || result.acknowledged == true)) {
+                    const result = await shopCollection.deleteOne({ shopId });
+                    res.send(result);
+                } else {
+                    res.status(500).send({ message: 'Failed to update users' });
+
+                }
+            } catch (error) {
+                res.status(500).send({ message: 'Internal server error' });
+            }
+
+        })
+
         //Products related API
-        app.post('/addProduct', verifyToken, verifyManager, async (req, res) => {
+        app.post('/addProduct', verifyToken, verifyAdminManager, async (req, res) => {
             let productInfo = req.body;
 
             const productAggregate = await productCollection.aggregate([
@@ -255,7 +353,6 @@ async function run() {
             // Insert the shopId into shopInfo
             productInfo.productId = productId;
 
-            // console.log(productInfo);
             const emailQuery = { shopOwnerEmail: productInfo.shopOwnerEmail };
             const shop = await shopCollection.findOne(emailQuery);
             if (!shop) {
@@ -278,15 +375,12 @@ async function run() {
                 res.send(result);
 
             }
-            // console.log(updatedShop);
 
         })
 
         app.get('/allProducts', verifyToken, verifyAdmin, async (req, res) => {
-            const email = req.decoded.email;
-            // console.log("Requested Email inproducts:", email);
+            // const email = req.decoded.email;
             const result = await productCollection.find().toArray();
-            // console.log(result);
             res.send(result);
         })
 
@@ -295,16 +389,15 @@ async function run() {
             const shopId = req.query.shop;
             const query = { shopId: shopId };
             const result = await productCollection.find(query).toArray();
-            // console.log(result);
             res.send(result);
         })
 
-        // app.get('/product/:id', async (req, res) => {
-        //     const id = req.params.id;
-        //     const query = { _id: new ObjectId(id) }
-        //     const result = await productCollection.findOne(query);
-        //     res.send(result);
-        // })
+        app.get('/product/:id', verifyToken, async (req, res) => {
+            const productId = req.params.id;
+            const query = { _id: new ObjectId(productId) }
+            const result = await productCollection.findOne(query);
+            res.send(result);
+        })
 
         app.get('/categories', async (req, res) => {
             const shopId = req.query.shopId;
@@ -322,7 +415,7 @@ async function run() {
 
         })
 
-        app.patch('/updateProduct/:id', verifyToken, verifyManager, async (req, res) => {
+        app.patch('/updateProduct/:id', verifyToken, verifyAdminManager, async (req, res) => {
             const id = req.params.id;
             const productInfo = req.body;
             const query = { _id: new ObjectId(id) };
@@ -341,19 +434,19 @@ async function run() {
                     sellingPrice: productInfo.sellingPrice,
                 },
             };
-            // console.log(updateDoc);
             const result = await productCollection.updateOne(query, updateDoc);
             res.send(result);
 
 
         })
 
-        app.delete('/deleteProduct/:id', verifyToken, verifyManager, async (req, res) => {
+        app.delete('/deleteProduct/:id', verifyToken, verifyAdminManager, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) }
-            const emailQuery = { shopOwnerEmail: req.decoded.email };
+            const shop = await productCollection.findOne(query);
+            const shopQuery = { shopId: shop.shopId };
             const updatedShop = await shopCollection.updateOne(
-                emailQuery,
+                shopQuery,
                 {
                     $inc: {
                         // productLimit: -1,
@@ -361,7 +454,6 @@ async function run() {
                     },
                 }
             );
-            // console.log(updatedShop);
             if (updatedShop.modifiedCount > 0) {
                 const result = await productCollection.deleteOne(query);
                 res.send(result);
@@ -380,10 +472,6 @@ async function run() {
         app.post('/carts', verifyToken, verifyShopAuthorized, async (req, res) => {
             let cartItem = req.body;
             const productQuery = { productId: cartItem.productId };
-            employQuery = cartItem.issueBy;
-            const shop = await shopCollection.findOne({ 'shopEmployes': employQuery });
-            // Insert the shopId into cartItem
-            cartItem.shopId = shop.shopId;
 
             const product = await productCollection.findOne(productQuery);
             if (product.stockQuantity > 0) {
@@ -471,21 +559,108 @@ async function run() {
                     return res.status(422).send({ message: 'No items found for Generate Bill' });
                 }
             } catch (error) {
-                console.error(error);
                 return res.status(500).send({ message: 'Internal Server Error' });
             }
         });
 
         // to get sale items of individual shop in ShopHome
         app.get('/saleItems', verifyToken, async (req, res) => {
-            // console.log(req.query.shop);
             const shopQuery = { shopId: req.query.shop }
             const result = await invoiceCollection.find(shopQuery).toArray();
             res.send(result);
 
         });
 
-        // to get sale items of individual shop in ShopHome
+
+        app.get('/shopInvoice', async (req, res) => {
+            try {
+                const shopId = req.query.shop;
+                const result = await invoiceCollection.aggregate([
+                    { $match: { shopId: shopId } },
+                    {
+                        $group: {
+                            _id: { invoiceNumber: "$invoiceNumber", shopId: "$shopId" }
+                        }
+                    },
+                    {
+                        $project: {
+                            _id: 0, // Exclude the _id field
+                            invoiceNumber: "$_id.invoiceNumber",
+                            shopId: "$_id.shopId"
+                        }
+                    }
+                ]).toArray();
+                res.send(result);
+            } catch (error) {
+                res.status(500).send("Internal Server Error");
+            }
+        });
+        app.get('/invoice', async (req, res) => {
+            const invId = req.query.inv;
+            const result = await invoiceCollection.find({ invoiceNumber: invId }).toArray();
+            res.send(result);
+        });
+
+        //Create a PaymentIntent
+        app.post("/create-payment-intent", async (req, res) => {
+            const { price } = req.body;
+            const amount = parseInt(price * 100);
+            // Create a PaymentIntent with the order amount and currency
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount: amount,
+                currency: 'usd',
+                "payment_method_types": [
+                    "card",
+
+                ],
+            });
+            res.send({
+                clientSecret: paymentIntent.client_secret,
+            });
+        });
+
+        app.post('/payments', async (req, res) => {
+            try {
+                const paymentInfo = req.body;
+
+                const paymentResult = await paymentCollection.insertOne(paymentInfo);
+
+                if (paymentResult.insertedId) {
+                    const insertedIdString = paymentResult.insertedId.toString();
+                    const shopQuery = { shopId: paymentInfo.shopId };
+
+                    const updatedShop = await shopCollection.updateOne(
+                        shopQuery,
+                        {
+                            $inc: {
+                                productLimit: paymentInfo.limit,
+                                purchaseCount: 1,
+                            },
+                            $push: {
+                                paymentIds: insertedIdString,
+                            },
+                        }
+                    );
+                    if (updatedShop.acknowledged === true) {
+                        res.send(updatedShop);
+                    } else {
+                        res.status(500).send('Failed to update shop information.Please contact IT dept.');
+                    }
+                } else {
+                    res.status(500).send('Failed to process this payment. Contact It dept.');
+                }
+            } catch (error) {
+                res.status(500).send('Internal Server Error. Contact It dept.');
+            }
+        });
+
+
+        app.get('/shop-payment', verifyToken, verifyAdmin, async (req, res) => {
+            const result = await paymentCollection.find().toArray();
+            res.send(result);
+        });
+
+
         app.get('/chart-data', verifyToken, async (req, res) => {
             try {
                 const shopQuery = { shopId: req.query.shop };
@@ -517,120 +692,48 @@ async function run() {
 
                 res.send(result);
             } catch (error) {
-                console.error("Error fetching projected sale data:", error);
                 res.status(500).send({ error: "Internal Server Error" });
             }
         });
 
-
-
-
-        app.get('/shopInvoice', async (req, res) => {
+        // get chart data only for admin on adminHome
+        app.get('/admin-chartData', verifyToken, verifyAdmin, async (req, res) => {
             try {
-                const shopId = req.query.shop;
-                const result = await invoiceCollection.aggregate([
-                    { $match: { shopId: shopId } },
+                const aggregationPipeline = [
                     {
                         $group: {
-                            _id: { invoiceNumber: "$invoiceNumber", shopId: "$shopId" }
+                            _id: '$shopId',
+                            shopName: { $first: '$shopName' },
+                            purchaseCount: { $sum: 1 },
+                            totalPurchaseAmt: { $sum: '$paidAmount' },
+                            totalLimit: { $sum: '$limit' },
                         }
                     },
                     {
                         $project: {
-                            _id: 0, // Exclude the _id field
-                            invoiceNumber: "$_id.invoiceNumber",
-                            shopId: "$_id.shopId"
+                            _id: 0,
+                            shopId: '$_id',
+                            shopName: 1,
+                            purchaseCount: 1,
+                            totalPurchaseAmt: 1,
+                            totalLimit: 1,
                         }
                     }
-                ]).toArray();
-                res.send(result);
+                ];
+
+                const result = await paymentCollection.aggregate(aggregationPipeline).toArray();
+
+                res.json(result);
             } catch (error) {
-                res.status(500).send("Internal Server Error");
+                res.status(500).send('Internal Server Error');
             }
         });
-        app.get('/invoice', async (req, res) => {
-            const invId = req.query.inv;
-            // console.log(invId)
-            const result = await invoiceCollection.find({ invoiceNumber: invId }).toArray();
-            // console.log(result)
-            res.send(result);
-        });
 
-        //Create a PaymentIntent
-        app.post("/create-payment-intent", async (req, res) => {
-            const { price } = req.body;
-            const amount = parseInt(price * 100);
-            // Create a PaymentIntent with the order amount and currency
-            const paymentIntent = await stripe.paymentIntents.create({
-                amount: amount,
-                currency: 'usd',
-                "payment_method_types": [
-                    "card",
-
-                ],
-            });
-            res.send({
-                clientSecret: paymentIntent.client_secret,
-            });
-        });
-
-        app.post('/payments', async (req, res) => {
-            const paymentInfo = req.body;
-            // package limit 
-            let limit = 0;
-            if (paymentInfo.paidAmount >= 50) {
-                limit = 1500;
-            } else if (paymentInfo.paidAmount >= 20) {
-                limit = 450;
-            } else if (paymentInfo.paidAmount >= 10) {
-                limit = 200;
-            }
-
-            const shopQuery = { shopId: paymentInfo.shopId };
-            const updatedShop = await shopCollection.updateOne(
-                shopQuery,
-                {
-                    $set: {
-                        productLimit: limit,
-                    },
-                }
-            );
-            // console.log(updatedShop);
-            if (updatedShop.modifiedCount > 0) {
-                const paymentResult = await paymentCollection.insertOne(paymentInfo);
-                res.send(paymentResult);
-            }
-        })
-
-
-        // Generate pdf from htlm
-
-        app.post('/generate-pdf', async (req, res) => {
-            const { htmlContent } = req.body;
-
-            const browser = await puppeteer.launch({
-                headless: 'new',
-            });
-            const page = await browser.newPage();
-
-            await page.pdf({
-                format: 'A4',
-            });
-
-            await page.setContent(htmlContent);
-
-            const pdfBuffer = await page.pdf();
-
-            await browser.close();
-
-            res.setHeader('Content-Type', 'application/pdf');
-            res.send(pdfBuffer);
-        });
 
 
         // Send a ping to confirm a successful connection
-        await client.db("admin").command({ ping: 1 });
-        console.log("Pinged your deployment. You successfully connected to MongoDB!");
+        // await client.db("admin").command({ ping: 1 });
+        // console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
         // Ensures that the client will close when you finish/error
         // await client.close();
